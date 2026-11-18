@@ -9,8 +9,10 @@ import { POSIX_HARNESS } from "./helpers/platform.js";
 
 const ENGINE = resolve("mods/revive/revive.mjs");
 const theirs = { type: "command", command: "~/bin/notify.sh" };
-// The test runner's own pi folder must not be installed into.
+// The test runner's own pi and OpenCode folders must not be installed into.
 delete process.env.PI_CODING_AGENT_DIR;
+delete process.env.OPENCODE_CONFIG_DIR;
+delete process.env.XDG_CONFIG_HOME;
 // Install and doctor count the running sessions Revive doesn't remember,
 // through hc: never the real one, whose core may hold this machine's
 // terminals. This one knows no terminals. /bin/sh: some tests run with a PATH
@@ -344,6 +346,61 @@ test("omp's extension is linked into ~/.omp/agent/extensions, and only that link
   // --no-omp skips it.
   run("install", "--no-shell", "--no-codex", "--no-omp");
   assert.ok(!existsSync(link));
+});
+
+test("OpenCode's plugin folder is linked into its plugins folder, and only that link is taken out", POSIX_HARNESS, () => {
+  const { home, run } = bareHome();
+  const link = join(home, ".config", "opencode", "plugins", "herdr-revive");
+  assert.equal(JSON.parse(run("doctor")).opencode, null, "no OpenCode, nothing to say");
+  mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+  assert.match(run("install", "--no-shell", "--no-codex"), /plugins\/herdr-revive[\s\S]*OpenCode loads the plugin the next time it starts/);
+  assert.ok(lstatSync(link).isSymbolicLink());
+  assert.equal(realpathSync(link), realpathSync("mods/revive/opencode"));
+  // What OpenCode reads in a plugin's folder: the terminal half, and a server half.
+  for (const file of ["tui.js", "index.js"]) assert.ok(existsSync(join(link, file)), file);
+  assert.equal(JSON.parse(run("doctor")).opencode, true);
+  assert.match(run("install", "--no-shell", "--no-codex"), /Nothing to change/);
+  run("uninstall", "--no-shell");
+  assert.ok(!lstatSync(link, { throwIfNoEntry: false }));
+  assert.ok(existsSync("mods/revive/opencode/tui.js"), "the mod's own folder is not what goes");
+  assert.equal(JSON.parse(run("doctor")).opencode, false);
+  // --no-opencode skips it.
+  run("install", "--no-shell", "--no-codex", "--no-opencode");
+  assert.ok(!lstatSync(link, { throwIfNoEntry: false }));
+});
+
+test("OpenCode's folder is found where OPENCODE_CONFIG_DIR or XDG_CONFIG_HOME puts it", POSIX_HARNESS, () => {
+  for (const [name, at] of [["XDG_CONFIG_HOME", ["xdg", "opencode"]], ["OPENCODE_CONFIG_DIR", ["elsewhere"]]]) {
+    const { home } = bareHome();
+    const dir = join(home, ...at);
+    mkdirSync(dir, { recursive: true });
+    const env = { ...process.env, HOME: home, USERPROFILE: home, SHELL: "/bin/bash", REVIVE_PLATFORM: "darwin", [name]: join(home, at[0]) };
+    execFileSync("node", [ENGINE, "install", "--no-shell", "--no-codex"], { env });
+    assert.equal(realpathSync(join(dir, "plugins", "herdr-revive")), realpathSync("mods/revive/opencode"), name);
+    assert.ok(!existsSync(join(home, ".config")), "the default folder is not made");
+  }
+});
+
+test("an OpenCode plugin placed by something else is left alone", POSIX_HARNESS, () => {
+  const { home, run } = bareHome();
+  const dir = join(home, ".config", "opencode", "plugins", "herdr-revive");
+  mkdirSync(dir, { recursive: true });
+  // A copy something else manages: it counts as installed, and stays.
+  copyFileSync("mods/revive/opencode/tui.js", join(dir, "tui.js"));
+  assert.doesNotMatch(run("install", "--no-shell", "--no-codex"), /herdr-revive/);
+  assert.equal(JSON.parse(run("doctor")).opencode, true);
+  run("uninstall", "--no-shell");
+  assert.ok(existsSync(join(dir, "tui.js")), "uninstall keeps a folder it didn't link");
+  // Another folder by that name is not Revive's to replace.
+  const other = bareHome();
+  const theirs = join(other.home, ".config", "opencode", "plugins", "herdr-revive");
+  mkdirSync(theirs, { recursive: true });
+  writeFileSync(join(theirs, "tui.js"), "export default { id: 'mine', setup() {} };\n");
+  const r = spawnSync("node", [ENGINE, "install", "--bash", "--no-codex"], { encoding: "utf8", env: { ...process.env, HOME: other.home, USERPROFILE: other.home, SHELL: "/bin/bash", CLAUDE_CONFIG_DIR: "", CODEX_HOME: "", ZDOTDIR: "", REVIVE_PLATFORM: "darwin" } });
+  assert.equal(r.status, 0);
+  assert.match(r.stderr, /not Revive's OpenCode plugin/);
+  assert.ok(readFileSync(join(other.home, ".bash_profile"), "utf8").includes("herdr-revive"), "the rest is still installed");
+  assert.equal(readFileSync(join(theirs, "tui.js"), "utf8"), "export default { id: 'mine', setup() {} };\n");
 });
 
 test("a pi extension placed by something else is left alone", POSIX_HARNESS, () => {

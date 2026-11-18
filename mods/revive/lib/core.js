@@ -38,16 +38,27 @@ const CODEX_VALUE_FLAGS = new Set([
   "-i", "--image", "-m", "--model", "--local-provider", "-p", "--profile",
   "-s", "--sandbox", "-a", "--ask-for-approval", "-C", "--cd", "--add-dir",
 ]);
-function codexOneShot(args) {
+/** The first word that is neither an option nor the value of one in `valueFlags`: the subcommand, if there is one. */
+function firstWord(args, valueFlags) {
   for (let i = 0; i < args.length; i++) {
     const word = args[i];
-    if (word === "--") return false;
-    if (CODEX_VALUE_FLAGS.has(word)) { i++; continue; }
+    if (word === "--") return null;
+    if (valueFlags.has(word)) { i++; continue; }
     if (word.startsWith("-")) continue;
-    return word === "exec" || word === "e";
+    return word;
   }
-  return false;
+  return null;
 }
+function codexOneShot(args) {
+  const word = firstWord(args, CODEX_VALUE_FLAGS);
+  return word === "exec" || word === "e";
+}
+
+// OpenCode's subcommands that answer and quit, or serve without a terminal
+// session of their own. `mini` is interactive, and not here; Revive's plugin
+// is for the full interface, so nothing records it either.
+const OPENCODE_VALUE_FLAGS = new Set(["-s", "--session", "--server", "--prompt", "--log-level", "--completions"]);
+const OPENCODE_COMMANDS = new Set(["upgrade", "update", "uninstall", "acp", "api", "debug", "auth", "mcp", "plugin", "models", "stats", "run", "session", "service", "reload", "pair", "serve"]);
 
 /**
  * The agents Revive can bring back, one entry each:
@@ -393,6 +404,39 @@ export const AGENTS = {
       "--allow-url": true,
     },
   },
+  // OpenCode, checked against opencode 2.2.7: `--session <id>` reopens that
+  // session (and opens an empty one by that id if there is none, so a resume
+  // never fails on a missing session). The full interface has no fork flag (`run`
+  // and `mini` have `--fork`; inside, the command palette forks). It has no
+  // hooks file, and its plugins that see sessions run in a background server
+  // shared by every terminal, so Revive's plugin (opencode/tui.js) is one for
+  // the terminal interface: it reports the session on screen. Its end carries
+  // no reason, and a SIGTERM or SIGHUP runs the same teardown as a person's
+  // exit: the plugin says nothing after a signal, and what it does say is
+  // settled by whether the terminal outlived OpenCode. `opencode` counts as
+  // the first word, or as the script an interpreter runs, never as an
+  // argument: it is also what people call the folder they keep it in.
+  // `--auto` and its two hidden spellings approve everything not denied.
+  // `--server` names where the session lives, so it is a need, never carried.
+  opencode: {
+    name: "OpenCode",
+    bin: "opencode",
+    interpreterOnly: true,
+    apps: ["opencode"],
+    resume: (id, flags) => ["opencode", ...flags, "--session", id],
+    fork: null,
+    end: () => "settle",
+    env: ["OPENCODE_DB", "XDG_DATA_HOME"],
+    findIn: ["--server"],
+    oneShot: (args) => OPENCODE_COMMANDS.has(firstWord(args, OPENCODE_VALUE_FLAGS)),
+    carry: {
+      "--standalone": 0,
+      "--auto": 0,
+      "--yolo": 0,
+      "--dangerously-skip-permissions": 0,
+    },
+    unattended: { "--auto": true, "--yolo": true, "--dangerously-skip-permissions": true },
+  },
 };
 
 /** Copilot CLI's subcommands: each runs once and quits, with no session to resume. */
@@ -449,12 +493,12 @@ export const endAction = (key, reason) => (AGENTS[key]?.end ?? claudeEnd)(reason
 
 /**
  * A hook's input, the same for every agent. Claude Code, Codex, Droid,
- * pi's extension and Copilot CLI send `SessionStart` with `session_id` and
+ * pi's extension, OpenCode's plugin and Copilot CLI send `SessionStart` with `session_id` and
  * `cwd` (Copilot only to hooks registered under that PascalCase name: a
  * `sessionStart` hook gets camelCase fields and no event name); Cursor sends
  * `sessionStart` with `conversation_id` and `workspace_roots`. `agent` is what
  * the payload itself says (its transcript path, Cursor's version field), or
- * null. `argv` is the command line pi's extension sends, or null.
+ * null. `argv` is the command line an extension or plugin sends, or null.
  */
 export function hookPayload(payload) {
   const p = payload && typeof payload === "object" ? payload : {};
@@ -687,6 +731,9 @@ export function command(rec, kind = "resume", { unattended = false } = {}) {
   return agent[kind](rec.session, unattended ? attendedFlags(rec.agent, flags).kept : flags);
 }
 
+/** What stands for a needed flag's value when it isn't a folder. */
+const NEED_VALUES = { "--server": "<url>" };
+
 /**
  * The command to run by hand for a record with needs: variables are set by
  * the person; a flag goes right after the agent's name, with a placeholder
@@ -695,7 +742,7 @@ export function command(rec, kind = "resume", { unattended = false } = {}) {
 export function needsCommand(rec, { dialect = "posix" } = {}) {
   const argv = command(rec, "resume");
   if (!argv) return null;
-  const added = rec.needs.filter((n) => n.startsWith("-")).map((f) => ` ${f} <folder>`).join("");
+  const added = rec.needs.filter((n) => n.startsWith("-")).map((f) => ` ${f} ${own(NEED_VALUES, f) ? NEED_VALUES[f] : "<folder>"}`).join("");
   if (dialectOf(dialect) === "pwsh") {
     const cd = rec.cwd ? `Set-Location -LiteralPath ${psQuote(rec.cwd)}; ` : "";
     return `${cd}& ${psQuote(argv[0])}${added}${argv.length > 1 ? ` ${argv.slice(1).map(psQuote).join(" ")}` : ""}`;

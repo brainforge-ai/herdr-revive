@@ -25,7 +25,7 @@ const SHELL = process.pid;
 const since = WINDOWS ? "" : execFileSync("ps", ["-o", "lstart=", "-p", String(SHELL)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).trim().split(/\s+/).join(" ");
 
 const base = { ...process.env };
-for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "REVIVE_SHELL", "ZDOTDIR"]) delete base[k];
+for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "REVIVE_SHELL", "ZDOTDIR"]) delete base[k];
 
 /** A temporary home, a fake hc and helpers to add terminals and agent files. */
 function world() {

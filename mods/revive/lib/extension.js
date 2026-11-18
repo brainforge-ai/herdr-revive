@@ -1,6 +1,7 @@
-// What pi's and omp's extensions share: running the engine's hook, one at a
-// time, and noticing a SIGTERM or SIGHUP before the session ends. Extensions
-// only (Node's child_process): the dialog and the engine never import it.
+// What pi's and omp's extensions and OpenCode's plugin share: running the
+// engine's hook, one at a time, and noticing a SIGTERM or SIGHUP before the
+// session ends. Extensions only (Node's child_process): the dialog and the
+// engine never import it.
 //
 // Each extension imports this file by its real path, so it is found next to
 // the engine however the extension was linked. What differs per agent (its
@@ -42,20 +43,22 @@ export function revive({ agent, args = [] }) {
   let listening = false;
   const onSignal = () => { signalled = true; };
 
+  /** Queues a hook with these fields and the command line. */
+  const post = (fields) => {
+    queue = queue.then(() => hook(args, { ...fields, argv: [agent, ...process.argv.slice(2)] }));
+    return queue;
+  };
+
   return {
     /** Queues a hook with the session's fields; nothing for a session without a file (--no-session). */
     send(ctx, fields) {
       const transcript_path = ctx.sessionManager.getSessionFile();
       if (!transcript_path) return queue;
-      queue = queue.then(() => hook(args, {
-        ...fields,
-        session_id: ctx.sessionManager.getSessionId(),
-        transcript_path,
-        cwd: ctx.cwd,
-        argv: [agent, ...process.argv.slice(2)],
-      }));
-      return queue;
+      return post({ ...fields, session_id: ctx.sessionManager.getSessionId(), transcript_path, cwd: ctx.cwd });
     },
+
+    /** Queues a hook for an agent that has no session manager (OpenCode): the fields are the whole payload. */
+    post,
 
     /** Starts noticing SIGTERM and SIGHUP; once, however often a session starts. */
     listen() {

@@ -3,8 +3,8 @@
 // the machine is rebooting, so the work happens where the session lives:
 //
 //   revive.mjs hook [--agent K]   an agent's SessionStart and SessionEnd (Claude Code, Codex,
-//                                 Droid, Cursor, Copilot CLI, pi's through pi/revive.ts and omp's through
-//                                 omp/revive.ts): remember the
+//                                 Droid, Cursor, Copilot CLI, pi's through pi/revive.ts, omp's through
+//                                 omp/revive.ts and OpenCode's through opencode/tui.js): remember the
 //                                 session on its terminal, or forget it
 //   revive.mjs check --shell PID  from the shell's rc file: print the commands that
 //                                 resume a session lost to a restart, or nothing
@@ -19,7 +19,7 @@
 //                                 nobody recorded (started before Revive was
 //                                 installed), or only T's; --dry-run says what
 //                                 it would write
-//   revive.mjs install [--zsh] [--bash] [--no-shell] [--no-codex] [--no-pi] [--no-omp] [--no-droid] [--no-cursor] [--no-copilot]
+//   revive.mjs install [--zsh] [--bash] [--no-shell] [--no-codex] [--no-pi] [--no-omp] [--no-opencode] [--no-droid] [--no-cursor] [--no-copilot]
 //   revive.mjs uninstall
 //   revive.mjs doctor             what is installed, as JSON
 //
@@ -269,7 +269,7 @@ async function hook(args = []) {
     // could race it and erase the new record. A signal (a crash, a kill, a
     // shutdown) reports "other": the record stays, worth bringing back. `/exit`,
     // Ctrl+C, `/logout`: the person ended it. Cursor's and Copilot's are in
-    // their AGENTS entries.
+    // their AGENTS entries, and OpenCode's, whose plugin gives no reason.
     const action = endAction(rec.agent, payload.reason);
     if (action === "forget") await label(t, clearArgs());
     else if (action === "settle") await settleLater(t, terminal.pid, session, target);
@@ -307,22 +307,26 @@ const alive = (pid) => {
 
 /**
  * For a SessionEnd whose reason can't tell the person's exit from a signal
- * (Copilot CLI's `user_exit`): whether the terminal outlived the agent, so
- * the person ended it. A core restart or a reboot closes the terminal, which
- * hangs up its shell, or stops the core; `/exit` leaves the shell at its
- * prompt. After REVIVE_SETTLE_MS, the core must still be up, the terminal live
- * with the same shell, and the same session on record. Copilot still in the
- * foreground as the same process (`agentPid`) means `/clear`: the person ended
- * this session for a new one. Another Copilot there may be resuming it, so it
- * stays. Any doubt keeps it.
+ * (Copilot CLI's `user_exit`, the end OpenCode's plugin reports): whether the
+ * terminal outlived the agent, so the person ended it. A core restart or a
+ * reboot closes the terminal, which hangs up its shell, or stops the core;
+ * `/exit` leaves the shell at its prompt. After REVIVE_SETTLE_MS, the core must
+ * still be up, the terminal live with the same shell, and the same session on
+ * record. Copilot still in the foreground as the same process (`agentPid`)
+ * means `/clear`: the person ended this session for a new one. Another Copilot
+ * there may be resuming it, so it stays. OpenCode still in the foreground,
+ * the same process or another, means its plugins were reloaded or it is being
+ * resumed: the session goes on, so it stays. Any doubt keeps it.
  */
 async function outlived(t, pid, session, agentPid) {
   await new Promise((resolve) => setTimeout(resolve, settleMs()));
   if (!(await coreUp())) return false;
   const now = await getTerminal(t).catch(() => null);
   if (!now || now.state !== "live" || !pid || now.pid !== pid || !alive(now.pid)) return false;
-  if (readRecord(now.labels)?.session !== session) return false;
-  return liveAgent(now) !== "copilot" || now.foreground?.pid === agentPid;
+  const rec = readRecord(now.labels);
+  if (rec?.session !== session) return false;
+  if (liveAgent(now) !== rec.agent) return true;
+  return rec.agent === "copilot" && now.foreground?.pid === agentPid;
 }
 
 // ── records read back ───────────────────────────────────────────────────────
@@ -776,19 +780,31 @@ const codexHooks = () => join(codexDir(), "hooks.json");
 const piDir = () => process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 // omp reads PI_CODING_AGENT_DIR too, but a pi setup sets it for pi: omp's own folder is assumed.
 const ompDir = () => join(homedir(), ".omp", "agent");
+// OpenCode's config folder, as OpenCode finds it (read off opencode 2.2.7).
+const opencodeDir = () => process.env.OPENCODE_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode");
 /**
- * pi and omp have no hooks file: their hooks come from an extension, kept in
- * the mod and linked where each loads extensions. It finds the engine from its
- * own place. `marker` is its first line; a copy placed by something else (a
- * Nix store path) counts too.
+ * pi, omp and OpenCode have no hooks file: their hooks come from an extension
+ * (for OpenCode, a plugin), kept in the mod and linked where each loads them.
+ * It finds the engine from its own place. `marker` is its first line; a copy
+ * placed by something else (a Nix store path) counts too. OpenCode's is a
+ * folder (`path` is where it goes, `file` the one in it that holds the marker).
  */
 const EXTENSIONS = {
   pi: { dir: piDir, flag: "--no-pi", source: join(dirname(ENGINE), "pi", "revive.ts"), marker: "herdr-revive: pi extension" },
   omp: { dir: ompDir, flag: "--no-omp", source: join(dirname(ENGINE), "omp", "revive.ts"), marker: "herdr-revive: omp extension" },
+  opencode: {
+    dir: opencodeDir,
+    flag: "--no-opencode",
+    source: join(dirname(ENGINE), "opencode"),
+    marker: "herdr-revive: OpenCode plugin",
+    path: () => join(opencodeDir(), "plugins", "herdr-revive"),
+    file: "tui.js",
+    what: "plugin",
+  },
 };
 const EXTENSION_AGENTS = Object.keys(EXTENSIONS);
-const extensionPath = (key) => join(EXTENSIONS[key].dir(), "extensions", "herdr-revive.ts");
-const isExtension = (key, path) => readText(path).includes(EXTENSIONS[key].marker);
+const extensionPath = (key) => EXTENSIONS[key].path?.() ?? join(EXTENSIONS[key].dir(), "extensions", "herdr-revive.ts");
+const isExtension = (key, path) => readText(EXTENSIONS[key].file ? join(path, EXTENSIONS[key].file) : path).includes(EXTENSIONS[key].marker);
 const factoryDir = () => agentDirs({ ...process.env, HOME: homedir(), USERPROFILE: homedir() }).factory;
 const cursorDir = () => agentDirs({ ...process.env, HOME: homedir(), USERPROFILE: homedir() }).cursor;
 const copilotHooks = () => join(copilotDir(), "hooks", "herdr-revive.json");
@@ -1236,7 +1252,7 @@ async function install(args, remove = false) {
       notes.push(`Skipped ${AGENTS[key].name}: ${tilde(err.path)} is not valid JSON; fix it and run ${remove ? "uninstall" : "install"} again.`);
     }
   }
-  // A file of someone else's at pi's or omp's path: say so, and still install the rest.
+  // A file of someone else's at pi's, omp's or OpenCode's path: say so, and still install the rest.
   const warnings = [];
   for (const key of EXTENSION_AGENTS) {
     if (args.includes(EXTENSIONS[key].flag) || !existsSync(EXTENSIONS[key].dir())) continue;
@@ -1244,7 +1260,7 @@ async function install(args, remove = false) {
       if (linkExtension(key, remove)) {
         changed.push(extensionPath(key));
         // omp loads extensions only at start (its docs: modules are never re-evaluated).
-        if (!remove) notes.push(`${AGENTS[key].name} loads the extension the next time it starts${key === "pi" ? " (or at /reload)" : ""}.`);
+        if (!remove) notes.push(`${AGENTS[key].name} loads the ${EXTENSIONS[key].what ?? "extension"} the next time it starts${key === "pi" ? " (or at /reload)" : ""}.`);
       }
     } catch (err) { warnings.push(err.message); }
   }
@@ -1304,28 +1320,30 @@ const unrememberedNote = (n) => `${n} running Claude Code session${n === 1 ? " i
 const hcFailure = (err) => (err?.code === "ENOENT" ? `${HC} isn't on PATH` : String(err?.stderr || err?.message || err).trim().split("\n")[0]);
 
 /**
- * Links pi's or omp's extension to the mod's, or, with remove, takes out that
- * link. An extension already there (this link, or a copy something else
- * manages) is left alone, and so is anything else by that name: it isn't
- * Revive's to replace.
+ * Links pi's or omp's extension, or OpenCode's plugin folder, to the mod's,
+ * or, with remove, takes out that link. An extension already there (this
+ * link, or a copy something else manages) is left alone, and so is anything
+ * else by that name: it isn't Revive's to replace.
  */
 function linkExtension(key, remove, win = IS_WIN) {
   const target = extensionPath(key);
   const source = EXTENSIONS[key].source;
   const real = (p) => { try { return realpathSync(p); } catch { return null; } };
+  const folder = Boolean(EXTENSIONS[key].file);
   if (remove) {
-    if (win && readText(target) === extensionStub(key)) { rmSync(target); return true; }
+    if (win && !folder && readText(target) === extensionStub(key)) { rmSync(target); return true; }
     if (!lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink() || real(target) !== real(source)) return false;
     rmSync(target);
     return true;
   }
   if (isExtension(key, target)) return false;
-  if (lstatSync(target, { throwIfNoEntry: false })) throw new Error(`${target} is not Revive's ${AGENTS[key].name} extension; Revive won't replace it.`);
+  if (lstatSync(target, { throwIfNoEntry: false })) throw new Error(`${target} is not Revive's ${AGENTS[key].name} ${EXTENSIONS[key].what ?? "extension"}; Revive won't replace it.`);
   mkdirSync(dirname(target), { recursive: true });
   // Windows makes links only for administrators (or in Developer Mode): there,
-  // a one-line file that loads the mod's extension stands in for the link.
-  if (win) writeFileSync(target, extensionStub(key));
-  else symlinkSync(source, target);
+  // a one-line file that loads the mod's extension stands in for the link. A
+  // folder needs no stand-in: it is linked as a junction, which anyone may make.
+  if (win && !folder) writeFileSync(target, extensionStub(key));
+  else symlinkSync(source, target, folder ? "junction" : undefined);
   return true;
 }
 

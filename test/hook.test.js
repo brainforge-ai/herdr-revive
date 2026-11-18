@@ -77,6 +77,8 @@ delete base.CODEX_HOME;
 delete base.PI_CODING_AGENT_DIR;
 delete base.PI_CODING_AGENT_SESSION_DIR;
 delete base.COPILOT_HOME;
+delete base.OPENCODE_DB;
+delete base.XDG_DATA_HOME;
 
 const remembered = { "revive.agent": "claude", "revive.session": ID, "revive.shell": "4242" };
 
@@ -646,6 +648,87 @@ test("Copilot's captured hook input, end to end: recorded, then forgotten or set
   const clear = setup({ ...copilot, labels: exitRec });
   clear.run(fixture("session-end-user-exit"), settle(process.pid));
   assert.equal(clear.set(clear.calls())["revive.session"], "");
+});
+
+// ── OpenCode ────────────────────────────────────────────────────────────────
+
+// Hook input as Revive's plugin sent it from opencode 2.2.7 (see test/fixtures/opencode/README.md).
+const sent = (name) => JSON.parse(readFileSync(resolve("test/fixtures/opencode", `${name}.json`), "utf8"));
+const opencode = { bin: "opencode", argv: ["opencode", "--standalone", "--auto"] };
+const QUIT = "ses_e11b94557ffenyIPr0MCIi41jT";
+const AUTO = "ses_e11b871fcffems8RMA84SFHnNq";
+const opencodeRec = { ...remembered, "revive.agent": "opencode", "revive.session": QUIT };
+
+test("OpenCode's session is remembered from what its plugin sends, with its flags", POSIX_HARNESS, () => {
+  const { run, calls, set } = setup(opencode);
+  run(sent("session-start-auto"));
+  const got = set(calls());
+  assert.equal(got["revive.agent"], "opencode");
+  assert.equal(got["revive.session"], AUTO);
+  assert.equal(got["revive.cwd"], "/w");
+  assert.equal(got["revive.flags"], '["--standalone","--auto"]');
+  assert.equal(got["revive.needs"], "");
+  assert.equal(got["revive.shell"], "4242");
+});
+
+test("OpenCode comes back without --auto, as its plugin then reports it, and keeps the flag on record", POSIX_HARNESS, () => {
+  const labels = { ...opencodeRec, "revive.session": AUTO, "revive.flags": '["--standalone","--auto"]' };
+  const rec = readRecord(labels);
+  const resumed = sent("session-start-resumed");
+  // The command line the resumed OpenCode reported is the one an automatic resume builds.
+  assert.deepEqual(command(rec, "resume", { unattended: true }), resumed.argv);
+  const fixture = setup({ ...opencode, labels, argv: resumed.argv });
+  fixture.run(resumed, { env: { REVIVE_RESUME: JSON.stringify({ agent: "opencode", session: AUTO, flags: rec.flags }) } });
+  const got = readRecord({ ...labels, ...fixture.set(fixture.calls()) });
+  assert.deepEqual(got.flags, ["--standalone", "--auto"]);
+  assert.deepEqual(command(got), ["opencode", "--standalone", "--auto", "--session", AUTO], "a resume by hand has it again");
+});
+
+test("`opencode run` and `opencode serve` record nothing; a session on another server is a need", POSIX_HARNESS, () => {
+  const { argv: _, ...bare } = sent("session-start");
+  for (const argv of [["opencode", "run", "fix it"], ["opencode", "serve", "--service"]]) {
+    const once = setup({ bin: "opencode", argv });
+    once.run(bare);
+    assert.deepEqual(once.calls(), [], argv.join(" "));
+  }
+  const remote = setup(opencode);
+  remote.run({ ...sent("session-start"), argv: ["opencode", "--server", "http://10.0.0.5:4096", "--auto"] });
+  const got = remote.set(remote.calls());
+  assert.equal(got["revive.flags"], '["--auto"]');
+  assert.equal(got["revive.needs"], '["--server"]');
+});
+
+test("OpenCode's exit is kept when its shell died with it", POSIX_HARNESS, () => {
+  const hangup = setup({ ...opencode, labels: opencodeRec });
+  hangup.run(sent("session-end-exit"), settle(deadPid()));
+  assert.deepEqual(hangup.calls(), []);
+});
+
+test("OpenCode's exit is kept while OpenCode is still in the foreground: its plugins were reloaded", POSIX_HARNESS, async () => {
+  // The same process, as after a reload: for Copilot that is /clear, and forgets.
+  const reload = setup({ ...opencode, labels: opencodeRec });
+  reload.run(sent("session-end-exit"), settle(process.pid));
+  assert.deepEqual(reload.calls(), []);
+  // Another OpenCode by then: `opencode --session <id>` typed again within the wait.
+  const rerun = setup({ ...opencode, labels: opencodeRec });
+  rerun.run(sent("session-end-exit"), { env: { REVIVE_SETTLE_MS: "300", FAKE_PID: String(process.pid) } });
+  rerun.state({ fg: process.pid });
+  await settled(rerun);
+  assert.deepEqual(rerun.calls(), []);
+});
+
+test("OpenCode's exit forgets the session once the terminal's shell has outlived it", POSIX_HARNESS, async () => {
+  const exit = setup({ ...opencode, labels: opencodeRec });
+  exit.run(sent("session-end-exit"), { env: { REVIVE_SETTLE_MS: "300", FAKE_PID: String(process.pid) } });
+  assert.deepEqual(exit.calls(), [], "not before the wait");
+  for (let i = 0; i < 100 && !exit.calls().length; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(exit.set(exit.calls())["revive.session"], "");
+  // Another session on record by then stays.
+  const next = setup({ ...opencode, labels: opencodeRec });
+  next.run(sent("session-end-exit"), { env: { REVIVE_SETTLE_MS: "300", FAKE_PID: String(process.pid) } });
+  next.state({ labels: { ...opencodeRec, "revive.session": AUTO } });
+  await settled(next);
+  assert.deepEqual(next.calls(), []);
 });
 
 test("omp's SessionStart is remembered with the command line its extension sends", POSIX_HARNESS, () => {

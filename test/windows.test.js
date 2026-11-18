@@ -440,7 +440,7 @@ function winHome({ pi = false } = {}) {
   const pwsh = join(home, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1");
   const powershell = join(home, "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1");
   const env = { ...process.env, HOME: home, USERPROFILE: home, REVIVE_PWSH_PROFILE: pwsh, REVIVE_POWERSHELL_PROFILE: powershell, HC_TERMINAL_SOCKET: "" };
-  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "HC_TERMINAL_ID"]) delete env[k];
+  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME", "HC_TERMINAL_ID"]) delete env[k];
   const run = (...args) => execFileSync(process.execPath, [ENGINE, ...args], { encoding: "utf8", env });
   return { home, pwsh, powershell, run, env };
 }
